@@ -1,0 +1,315 @@
+#Libraries
+```{r}
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(randomForest)
+library(pheatmap)
+library(factoextra)
+library(pROC)
+```
+
+#Read in Olink and clinical data (COVID-19; PMID: 33969320)
+```{r}
+clinic_info <- read.delim("MGH_COVID_Clinical_Info.txt", header = F)
+npx_info <- read.delim("MGH_COVID_OLINK_NPX.txt", header = F)
+```
+
+#Clean and merge data
+```{r}
+clinic_df <- clinic_info %>%
+  mutate(id = row_number()) %>%
+  separate_rows(V1, sep = ";") %>%
+  group_by(id) %>%
+  mutate(col_id = row_number()) %>%
+  pivot_wider(names_from = col_id, values_from = V1, names_prefix = "V") %>%
+  ungroup() %>%
+  select(-id)
+colnames(clinic_df) <- clinic_df[1,]
+clinic_df <- clinic_df %>%
+  slice(-1)
+
+npx_df <- npx_info %>%
+  mutate(id = row_number()) %>%
+  separate_rows(V1, sep = ";") %>%
+  group_by(id) %>%
+  mutate(col_id = row_number()) %>%
+  pivot_wider(names_from = col_id, values_from = V1, names_prefix = "V") %>%
+  ungroup() %>%
+  select(-id)
+colnames(npx_df) <- npx_df[1,]
+npx_df <- npx_df %>%
+  slice(-1)
+
+subject_npx <- npx_df %>% filter(subject_id != "") %>% 
+  filter(QC_Warning != "WARN") %>%
+  filter(Assay_Warning != "WARN")
+clinical_npx <- merge(subject_npx, clinic_df, by = "subject_id")
+```
+
+#Identify proteins that are significant in patients with severe disease outcomes on Day 0
+```{r}
+#First identify proteins that are enriched in COVID positive patients (t-test)
+clinical_day0 <- clinical_npx %>% 
+  filter(Timepoint == "D0") %>%
+  mutate(NPX = as.numeric(NPX))
+proteins <- unique(clinical_day0$Assay)
+COVID_biomarker <- data.frame(Protein = character(),
+                      p_value_COVID = numeric(),
+                      stringsAsFactors = FALSE)
+for (i in proteins) {
+  data_subset <- clinical_day0 %>% 
+    filter(Assay == i)
+  positive <- data_subset %>% filter(COVID == "1")
+  negative <- data_subset %>% filter(COVID == "0")
+  
+  ttest <-t.test(as.numeric(positive$NPX), as.numeric(negative$NPX))
+  
+  COVID_biomarker <- rbind(COVID_biomarker, data.frame(
+   Assay = i,
+   p_value_NPX = ttest$p.value))
+}
+COVID_biomarker <- COVID_biomarker %>%
+  mutate(adj_p_NPX = p.adjust(p_value_NPX, method = "BH")) %>%
+  filter(adj_p_NPX < 0.05)
+
+#Identify proteins that may mark severe disease outcome (linear regression)
+COVID_positive <- clinical_day0 %>% 
+  filter(COVID == "1") %>%                                  
+  select(subject_id, Assay, NPX, Acuity_max) %>%             
+  group_by(Assay, Acuity_max, subject_id) %>%                
+  summarise(mean_value = mean(NPX, na.rm = TRUE)) %>%        
+  ungroup()
+acuity_list <- list()
+for (i in proteins) {
+  df_subset <- COVID_positive %>% 
+    filter(Assay == i) %>%                                  
+    group_by(Assay)                                          
+  Acuity_model <- df_subset %>%
+    summarize(p_value = summary(lm(as.integer(Acuity_max) ~ as.numeric(mean_value), data = .))$coefficients[2, 4])
+  acuity_list[[i]] <- Acuity_model
+}
+acuity_results_df <- bind_rows(acuity_list, .id = "Assay") %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH"))
+
+Acuity_biomarkers <- acuity_results_df %>% 
+  filter(p_adj < 0.05)
+
+#Intersect proteins that are enriched in disease state and display significance in acuity
+Biomarkers_of_interest <- merge(Acuity_biomarkers, COVID_biomarker, by = "Assay")
+top5 <- Biomarkers_of_interest %>%
+  arrange(desc(p_adj)) %>% 
+  slice_tail(n = 5)       
+top5_plotting <- clinical_day0 %>%
+  filter(Assay %in% top5$Assay) %>% 
+  select(subject_id, Assay, NPX, Acuity_max, COVID) %>%
+  filter(COVID == "1") %>%
+  group_by(subject_id, Assay, Acuity_max, COVID) %>%
+  summarise(mean_value = mean(NPX, na.rm = TRUE))
+  
+#Make a boxplot of the 5 most signficant Proteins  
+ggplot(top5_plotting, aes(x = Acuity_max, y = mean_value, color = Assay)) +
+  geom_boxplot() +
+  xlab(expression("Maximum Acuity")) +
+  ylab(expression("NPX")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+```
+
+#Make a heatmap of significant proteins
+```{r}
+Pheatmap_biomarkers <- clinical_day0 %>% 
+  filter(Assay %in% Biomarkers_of_interest$Assay) %>%
+  filter(COVID == "1") %>%
+  group_by(Assay, Acuity_max) %>% 
+  summarise(mean_value = mean(as.numeric(NPX)))
+Pheatmap_biomarkers_matric <- Pheatmap_biomarkers %>% 
+  pivot_wider(names_from = Acuity_max, values_from = mean_value)
+rownames_Pheatmap_biomarkers_matric <- Pheatmap_biomarkers_matric$Assay
+Pheatmap_biomarkers_matric$Assay <- NULL
+rownames(Pheatmap_biomarkers_matric) <- rownames_Pheatmap_biomarkers_matric
+
+#Find optimal number of clusters and cluster the biomarkers by Max acuity
+fviz_nbclust(Pheatmap_biomarkers_matric, kmeans, method = "wss")
+set.seed(100221)
+clusters <- pheatmap(Pheatmap_biomarkers_matric, cluster_cols = FALSE, kmeans_k = 4)
+clusters_info <- clusters$kmeans$cluster
+Pheatmap_biomarkers_matric_cluster <- cbind(Pheatmap_biomarkers_matric, clusters_info)
+cluster3 <- cbind(Pheatmap_biomarkers_matric, clusters_info) %>%
+  filter(clusters_info == "3")
+cluster_3_fullInfo <- clinical_npx
+
+#Add kmean clusters to the heatmap
+cluster_assignment <- as.factor(Pheatmap_biomarkers_matric_cluster$clusters_info)
+row_annotation <- data.frame(Cluster = cluster_assignment)
+copy_matrix <- Pheatmap_biomarkers_matric
+rownames(row_annotation) <- rownames(copy_matrix)
+final_pheat <- pheatmap(copy_matrix, cluster_cols = FALSE, show_rownames = FALSE, annotation_row = row_annotation, annotation_colors = list(Cluster = c("1" = "cadetblue2", "2" = "darkorchid1", "3" = "red2", "4" = "darkolivegreen2")))
+```
+
+#Make a predictive model for disease outcomes using cluster 3 (30 biomarkers) and the 15 most significant biomarkers determined by linear regression
+##This model is bianry and aim to predict severe disease (Death or Intubation/ventilation) based on day 0 biomarkers
+```{r}
+#Generate dataframe for 45 proteins of interest (For Olink Target 48)
+target48 <- Biomarkers_of_interest %>%
+  filter(!(Assay %in% row.names(cluster3))) %>%
+  arrange(desc(p_adj)) %>% 
+  slice_tail(n = 15) %>%
+  select(Assay)
+cluster3_assay <- c(row.names(cluster3))
+target48 <- c(target48)
+target48 <- c(target48$Assay, cluster3_assay)
+rf_data_target48 <- clinical_npx %>% 
+  filter(COVID == "1") %>%
+  filter(Timepoint == "D0") %>%
+  filter(Assay %in% target48) %>%
+  select(subject_id, Assay, NPX, Acuity_max) %>%
+  group_by(subject_id, Assay, Acuity_max) %>% 
+  summarise(mean_value = mean(as.numeric(NPX))) %>%
+  ungroup %>%
+  mutate(Acuity_max = ifelse(Acuity_max %in% c("1", "2"), 1,
+                             ifelse(Acuity_max %in% c("3", "4", "5"), 0, NA))) %>%
+  pivot_wider(names_from = Assay, values_from = mean_value) %>%
+  select(-1) %>%
+  na.omit()
+
+#Divide data into training and test data
+set.seed(100221)
+training_indicies <- sample(c(1,0), size = nrow(rf_data_target48), replace = TRUE, prob = c(0.7, 0.3))
+set.seed(100221)
+rf_data_target48 <- cbind(rf_data_target48, training_indicies)
+rf_data_target48_train <- rf_data_target48 %>%
+  filter(training_indicies == "1") %>%
+  select(-training_indicies)
+rf_data_target48_test <- rf_data_target48 %>%
+  filter(training_indicies == "0") %>%
+  select(-training_indicies)
+```
+
+#Generate model using random forest
+```{r}
+set.seed(123)
+acc_new <- c()
+acc_train <- c()
+meanDecreaseAcc <- matrix(NA, nrow = 100, ncol = ncol(rf_data_target48_train) - 1)
+meanDecreaseGini <- matrix(NA, nrow = 100, ncol = ncol(rf_data_target48_train) - 1)
+proteinMatrix <- matrix(NA, nrow = 100, ncol = ncol(rf_data_target48_train) - 1)
+for (i in 1:100) {
+rf_model_target48 <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_target48_train, importance = TRUE, ntree = 800, nodesize = 10, maxnodes = 10, mtry = 3)
+importance <- importance(rf_model_target48)
+Proteins <- rownames(importance)
+importance <- cbind(importance, Proteins)
+
+#Visualize the importance 
+varImpPlot(rf_model_target48, n.var = 10)
+
+#Test on training data
+predictions_train_t48 <- predict(rf_model_target48, rf_data_target48_train)
+confusion_matrix_train_t48 <- table(predictions_train_t48, rf_data_target48_train$Acuity_max)
+accuracy_train_t48 <- sum(diag(confusion_matrix_train_t48))/sum(confusion_matrix_train_t48)
+
+#Test on new data
+predictions_new_t48 <- predict(rf_model_target48, rf_data_target48_test)
+confusion_matrix_new_t48 <- table(predictions_new_t48, rf_data_target48_test$Acuity_max)
+accuracy_new_t48 <- sum(diag(confusion_matrix_new_t48))/sum(confusion_matrix_new_t48)
+acc_new[i] <- accuracy_new_t48
+acc_train[i] <- accuracy_train_t48
+meanDecreaseAcc[i, ] <- importance[, "MeanDecreaseAccuracy"]
+meanDecreaseGini[i, ] <- importance[, "MeanDecreaseGini"]
+proteinMatrix[i, ] <- importance[, "Proteins"]
+}
+```
+
+#Access machine learning performance
+```{r}
+set.seed(123)
+rf_model_target48 <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_target48_train, importance = TRUE, ntree = 800, nodesize = 10, maxnodes = 10, mtry = 3)
+
+set.seed(123)
+predictions_new_t48 <- predict(rf_model_target48, rf_data_target48_test)
+set.seed(123)
+predicted_prod <- predict(rf_model_target48, rf_data_target48_test, type = "prob")
+
+#Compute evaluation metrics 
+confusion_matrix_new_t48 <- table(predictions_new_t48, rf_data_target48_test$Acuity_max)
+accuracy <- sum(diag(confusion_matrix_new_t48))/sum(confusion_matrix_new_t48)
+precision <- confusion_matrix_new_t48[2,2]/sum(confusion_matrix_new_t48[2,])
+recall <- confusion_matrix_new_t48[2,2]/sum(confusion_matrix_new_t48[,2])
+f1_score <- 2 * (precision * recall)/(precision + recall)
+
+#Calculate area under the curve (AUC) and plot the ROC
+roc_curve <- roc(rf_data_target48_test$Acuity_max, predicted_prod[,2])
+auc <- auc(roc_curve)
+ROC_plot <- plot(roc_curve)
+```
+
+#Graph accuracy during training and testing
+```{r}
+acc_new_df <- cbind(acc_new, "new")
+colnames(acc_new_df) <- c("data", "accuracy")
+acc_train_df <- cbind(acc_train, "train")
+colnames(acc_train_df) <- c("data", "accuracy")
+acc_trainNew_graphing <- rbind(acc_new_df, acc_train_df)
+ggplot(acc_trainNew_graphing, aes(x = accuracy, y = as.numeric(data))) +
+  geom_boxplot() +
+  xlab(expression("Data Used")) +
+  ylab(expression("Accuracy")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  ylim(0.8, 1)
+```
+
+#Generate graphing dataframe for Mean Decrease Accurracy and Gini
+```{r}
+protein_importance <- proteinMatrix[1,]
+meanAcc <- c()
+meanGini <- c()
+for (i in 1:ncol(proteinMatrix)) {
+  meanAcc[i] <- mean(as.numeric(meanDecreaseAcc[ ,i]))
+  meanGini[i] <- mean(as.numeric(meanDecreaseGini[ ,i]))
+}
+Acc <- as.data.frame(cbind(protein_importance, meanAcc))
+Gini <- as.data.frame(cbind(protein_importance, meanGini))
+Acc_graphing <- Acc %>%
+  arrange(desc(as.numeric(meanAcc))) %>%
+  slice_head(n = 10)
+Gini_graphing <- Acc %>%
+  arrange(desc(as.numeric(meanGini))) %>%
+  slice_head(n = 10)
+colnames(meanDecreaseAcc) <- Proteins
+colnames(meanDecreaseGini) <- Proteins
+meanDecreaseAcc <- as.data.frame(meanDecreaseAcc)
+meanDecreaseGini <- as.data.frame(meanDecreaseGini)
+
+Gini_graphing_final <- meanDecreaseGini %>% 
+  select(all_of(Gini_graphing$protein_importance)) %>%
+  pivot_longer(cols = everything(), values_to = "Value")
+Gini_graphing_final$name <- factor(Gini_graphing_final$name, levels=c("KRT19", "POLR2F", "EZR", "IL6", "NPM1", "MATN3", "MAPK9", "PTX3", "AGR2", "CKAP4"))
+Acc_graphing_final <- meanDecreaseAcc %>% 
+  select(all_of(Acc_graphing$protein_importance)) %>%
+  pivot_longer(cols = everything(), values_to = "Value")
+Acc_graphing_final$name <- factor(Acc_graphing_final$name, levels=c("KRT19", "EZR", "MAPK9", "NPM1", "POLR2F", "NADK", "IL6", "MATN3", "PTX3", "IL15"))
+```
+
+#Graph Mean Decrease Accuracy and Gini  
+```{r}
+ggplot(Gini_graphing_final, aes(x = name, y = as.numeric(Value))) +
+  geom_boxplot() +
+  xlab(expression("Protein")) +
+  ylab(expression("Mean Decrease Gini")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+
+ggplot(Acc_graphing_final, aes(x = name, y = as.numeric(Value))) +
+  geom_boxplot() +
+  xlab(expression("Protein")) +
+  ylab(expression("Mean Decrease Accuracy")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+```{r}
+ggplot(rf_data_target48, aes(x = KRT19, y = POLR2F, color = Acuity_max)) +
+  geom_point() +
+  xlab(expression("KRT19")) +
+  ylab(expression("POLR2F")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) 
+
+```
