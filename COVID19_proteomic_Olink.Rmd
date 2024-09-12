@@ -147,6 +147,7 @@ rownames(row_annotation) <- rownames(copy_matrix)
 final_pheat <- pheatmap(copy_matrix, cluster_cols = FALSE, show_rownames = FALSE, annotation_row = row_annotation, annotation_colors = list(Cluster = c("1" = "cadetblue2", "2" = "darkorchid1", "3" = "red2", "4" = "darkolivegreen2")))
 ```
 
+#Make a model with all biomarkers
 #Make a model to predict of the 469 biomarkers play the most important role in prediciton. 
 ```{r}
 #Generate a dataframe of the 469 proteins previously determined to be COVID biomarkers and associated with acuity
