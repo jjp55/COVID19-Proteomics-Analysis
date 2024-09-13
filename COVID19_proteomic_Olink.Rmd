@@ -151,6 +151,7 @@ final_pheat <- pheatmap(copy_matrix, cluster_cols = FALSE, show_rownames = FALSE
 #Make a model to predict of the 469 biomarkers play the most important role in prediciton. 
 ```{r}
 #Generate a dataframe of the 469 proteins previously determined to be COVID biomarkers and associated with acuity
+##Remove missing data
 full_model <- clinical_day0 %>%
   filter(Assay %in% Biomarkers_of_interest$Assay) %>%
   filter(COVID == "1") %>%
@@ -162,13 +163,13 @@ full_model <- clinical_day0 %>%
                              ifelse(Acuity_max %in% c("3", "4", "5"), 0, NA))) %>%
   pivot_wider(names_from = Assay, values_from = mean_value) %>%
   select(-1) %>%
-  na.omit()
+  na.omit
 
 #Divide data into training and test data
 set.seed(100221)
 training_indicies <- sample(c(1,0), size = nrow(full_model), replace = TRUE, prob = c(0.7, 0.3))
 set.seed(100221)
-rf_data_full <- cbind(full_model, training_indicies)
+rf_data_full <- as.data.frame(cbind(full_model, training_indicies))
 rf_data_full_train <- rf_data_full %>%
   filter(training_indicies == "1") %>%
   select(-training_indicies)
@@ -179,25 +180,57 @@ rf_data_full_test <- rf_data_full %>%
 
 #Optomize random forest parameters
 ```{r}
-ntree_values <- c(seq(from = 50, to = 1000, by = 50))
-nodesize_values <- c(seq(from = 3, to = 15, by = 1))
-maxnode_values <- c(seq(from = 5, to = 20, by = 5))
+ntree_values <- c(seq(from = 100, to = 800, by = 100))
+nodesize_values <- c(seq(from = 2, to = 20, by = 2))
+maxnode_values <- c(seq(from = 2, to = 20, by = 2))
+
 results <- data.frame(ntree = integer(), nodesize = integer(), maxnodes = integer(), accuracy_train = numeric(), accuracy_test = numeric())
 
+set.seed(100221)
 for (ntree in ntree_values) {
   for (nodesize in nodesize_values) {
     for (maxnodes in maxnode_values) {
       
-rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = ntree, nodesize = nodesize, maxnodes = maxnodes)
+      # Initialize the accuracy vectors for each parameter combination
+      acc_new <- c()
+      acc_train <- c()
+      
+      for (i in 1:10) {
+        # Train Random Forest model
+        rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = ntree, nodesize = nodesize, maxnodes = maxnodes)
+        
+        # Make predictions
+        predictions_train <- predict(rf_model_full, rf_data_full_train)
+        predictions_test <- predict(rf_model_full, rf_data_full_test)
+        
+        # Calculate accuracy for training and test sets
+        accuracy_train_full <- sum(predictions_train == rf_data_full_train$Acuity_max) / nrow(rf_data_full_train)
+        accuracy_new_full <- sum(predictions_test == rf_data_full_test$Acuity_max) / nrow(rf_data_full_test)
+        
+        # Store the accuracy values for each iteration
+        acc_new[i] <- accuracy_new_full
+        acc_train[i] <- accuracy_train_full
+      }
+      
+      # Compute the mean accuracy for this parameter combination
+      acc_train_mean <- mean(acc_train)
+      acc_new_mean <- mean(acc_new)
+      
+      # Append the results for this parameter combination to the results data frame
+      results <- rbind(results, data.frame(ntree = ntree, nodesize = nodesize, maxnodes = maxnodes, accuracy_train = acc_train_mean, accuracy_test = acc_new_mean))
+    }
+  }
+}
 
-predictions_train <- predict(rf_model_full, rf_data_full_train)
-predictions_test <- predict(rf_model_full, rf_data_full_test)
+```
 
-accuracy_train <- sum(predictions_train == rf_data_full_train$Acuity_max) / nrow(rf_data_full_train)
-accuracy_test <- sum(predictions_test == rf_data_full_test$Acuity_max) / nrow(rf_data_full_test)
-results <- rbind(results, data.frame(ntree = ntree, nodesize = nodesize, maxnodes = maxnodes, accuracy_train = accuracy_train, accuracy_test = accuracy_test))
-
-}}}
+#Graph accuracy based on random forest parameters
+```{r}
+ggplot(results, aes(x = ntree, y = as.numeric(accuracy_test), color = as.factor(nodesize))) +
+  geom_point() +
+  xlab(expression("Number of Trees")) +
+  ylab(expression("Test Accuracy")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
 ```
 
 #Generate using a random forest model using all data points using the maximum testing accuracy parameters
@@ -209,7 +242,7 @@ meanDecreaseAcc <- matrix(NA, nrow = 100, ncol = ncol(rf_data_full_train) - 1)
 meanDecreaseGini <- matrix(NA, nrow = 100, ncol = ncol(rf_data_full_train) - 1)
 proteinMatrix <- matrix(NA, nrow = 100, ncol = ncol(rf_data_full_train) - 1)
 for (i in 1:100) {
-rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = 150, nodesize = 15, maxnodes = 20)
+rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = 375, nodesize = 9, maxnodes = 10)
 importance <- importance(rf_model_full)
 Proteins <- rownames(importance)
 importance <- cbind(importance, Proteins)
@@ -318,3 +351,6 @@ ggplot(Acc_graphing_final, aes(x = name, y = as.numeric(Value))) +
   ylab(expression("Mean Decrease Accuracy")) +
   theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
 ```
+
+#Olink allows up to 21 biomarkers on the Flex
+#See if using just 21 biomarkers is enough
