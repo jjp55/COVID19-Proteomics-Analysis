@@ -224,15 +224,6 @@ for (ntree in ntree_values) {
 
 ```
 
-#Graph accuracy based on random forest parameters
-```{r}
-ggplot(results, aes(x = ntree, y = as.numeric(accuracy_test), color = as.factor(nodesize))) +
-  geom_point() +
-  xlab(expression("Number of Trees")) +
-  ylab(expression("Test Accuracy")) +
-  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
-```
-
 #Generate using a random forest model using all data points using the maximum testing accuracy parameters
 ```{r}
 set.seed(100221)
@@ -242,7 +233,7 @@ meanDecreaseAcc <- matrix(NA, nrow = 100, ncol = ncol(rf_data_full_train) - 1)
 meanDecreaseGini <- matrix(NA, nrow = 100, ncol = ncol(rf_data_full_train) - 1)
 proteinMatrix <- matrix(NA, nrow = 100, ncol = ncol(rf_data_full_train) - 1)
 for (i in 1:100) {
-rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = 375, nodesize = 9, maxnodes = 10)
+rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = 440, nodesize = 6, maxnodes = 14)
 importance <- importance(rf_model_full)
 Proteins <- rownames(importance)
 importance <- cbind(importance, Proteins)
@@ -305,7 +296,7 @@ ggplot(acc_trainNew_graphing, aes(x = accuracy, y = as.numeric(data))) +
   ylim(0.7, 1)
 ```
 
-#Generate graphing dataframe for Mean Decrease Accurracy and Gini
+#Identify the top 21 proteins of importance in Gini and Accuracy
 ```{r}
 protein_importance <- proteinMatrix[1,]
 meanAcc <- c()
@@ -316,12 +307,13 @@ for (i in 1:ncol(proteinMatrix)) {
 }
 Acc <- as.data.frame(cbind(protein_importance, meanAcc))
 Gini <- as.data.frame(cbind(protein_importance, meanGini))
+
 Acc_graphing <- Acc %>%
   arrange(desc(as.numeric(meanAcc))) %>%
-  slice_head(n = 10)
-Gini_graphing <- Acc %>%
+  slice_head(n = 15)
+Gini_graphing <- Gini %>%
   arrange(desc(as.numeric(meanGini))) %>%
-  slice_head(n = 10)
+  slice_head(n = 15)
 colnames(meanDecreaseAcc) <- Proteins
 colnames(meanDecreaseGini) <- Proteins
 meanDecreaseAcc <- as.data.frame(meanDecreaseAcc)
@@ -334,7 +326,6 @@ Gini_graphing_final <- meanDecreaseGini %>%
 Acc_graphing_final <- meanDecreaseAcc %>% 
   select(all_of(Acc_graphing$protein_importance)) %>%
   pivot_longer(cols = everything(), values_to = "Value")
-
 ```
 
 #Graph Mean Decrease Accuracy and Gini  
@@ -353,4 +344,95 @@ ggplot(Acc_graphing_final, aes(x = name, y = as.numeric(Value))) +
 ```
 
 #Olink allows up to 21 biomarkers on the Flex
+```{r}
+top21 <- unique(c(Gini_graphing$protein_importance, Acc_graphing$protein_importance))
+gini_merger <- subset(Gini, Gini$protein_importance %in% top21)
+Acc_merger <- subset(Acc, Acc$protein_importance %in% top21)
+merged_gini_acc <- merge(gini_merger, Acc_merger, by = "protein_importance")
+```
+
+```{r}
+ggplot(merged_gini_acc, aes(x = as.numeric(meanGini), y = as.numeric(meanAcc), color = protein_importance)) +
+  geom_point() +
+  xlab(expression("Mean Gini")) +
+  ylab(expression("Mean Accuracy")) +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+#Make a model to predict of the top 21 biomarkers play the most important role in prediciton. 
+```{r}
+#Generate a dataframe of the top 21 proteins previously determined to be COVID biomarkers and associated with acuity
+##Remove missing data
+top21_data <- clinical_day0 %>%
+  filter(Assay %in% merged_gini_acc$protein_importance) %>%
+  filter(COVID == "1") %>%
+  select(subject_id, Assay, NPX, Acuity_max) %>%
+  group_by(subject_id, Assay, Acuity_max) %>% 
+  summarise(mean_value = mean(as.numeric(NPX))) %>%
+  ungroup %>%
+  mutate(Acuity_max = ifelse(Acuity_max %in% c("1", "2"), 1,
+                             ifelse(Acuity_max %in% c("3", "4", "5"), 0, NA))) %>%
+  pivot_wider(names_from = Assay, values_from = mean_value) %>%
+  select(-1) %>%
+  na.omit
+
+#Divide data into training and test data
+set.seed(100221)
+training_indicies <- sample(c(1,0), size = nrow(top21_data), replace = TRUE, prob = c(0.7, 0.3))
+set.seed(100221)
+rf_data_top <- as.data.frame(cbind(top21_data, training_indicies))
+rf_data_top_train <- rf_data_top %>%
+  filter(training_indicies == "1") %>%
+  select(-training_indicies)
+rf_data_top_test <- rf_data_top %>%
+  filter(training_indicies == "0") %>%
+  select(-training_indicies)
+```
+
+#Optomize random forest parameters for the top 21 biomarkers
+```{r}
+ntree_values <- c(seq(from = 100, to = 500, by = 20))
+nodesize_values <- c(seq(from = 2, to = 20, by = 2))
+maxnode_values <- c(seq(from = 2, to = 20, by = 2))
+
+results <- data.frame(ntree = integer(), nodesize = integer(), maxnodes = integer(), accuracy_train = numeric(), accuracy_test = numeric())
+
+set.seed(100221)
+for (ntree in ntree_values) {
+  for (nodesize in nodesize_values) {
+    for (maxnodes in maxnode_values) {
+      
+      # Initialize the accuracy vectors for each parameter combination
+      acc_new <- c()
+      acc_train <- c()
+      
+      for (i in 1:10) {
+        # Train Random Forest model
+        rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = ntree, nodesize = nodesize, maxnodes = maxnodes)
+        
+        # Make predictions
+        predictions_train <- predict(rf_model_full, rf_data_full_train)
+        predictions_test <- predict(rf_model_full, rf_data_full_test)
+        
+        # Calculate accuracy for training and test sets
+        accuracy_train_full <- sum(predictions_train == rf_data_full_train$Acuity_max) / nrow(rf_data_full_train)
+        accuracy_new_full <- sum(predictions_test == rf_data_full_test$Acuity_max) / nrow(rf_data_full_test)
+        
+        # Store the accuracy values for each iteration
+        acc_new[i] <- accuracy_new_full
+        acc_train[i] <- accuracy_train_full
+      }
+      
+      # Compute the mean accuracy for this parameter combination
+      acc_train_mean <- mean(acc_train)
+      acc_new_mean <- mean(acc_new)
+      
+      # Append the results for this parameter combination to the results data frame
+      results <- rbind(results, data.frame(ntree = ntree, nodesize = nodesize, maxnodes = maxnodes, accuracy_train = acc_train_mean, accuracy_test = acc_new_mean))
+    }
+  }
+}
+
+```
+
 #See if using just 21 biomarkers is enough
