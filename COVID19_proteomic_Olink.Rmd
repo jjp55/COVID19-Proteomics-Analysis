@@ -180,7 +180,7 @@ rf_data_full_test <- rf_data_full %>%
 
 #Optomize random forest parameters
 ```{r}
-ntree_values <- c(seq(from = 100, to = 800, by = 100))
+ntree_values <- c(seq(from = 100, to = 500, by = 20))
 nodesize_values <- c(seq(from = 2, to = 20, by = 2))
 maxnode_values <- c(seq(from = 2, to = 20, by = 2))
 
