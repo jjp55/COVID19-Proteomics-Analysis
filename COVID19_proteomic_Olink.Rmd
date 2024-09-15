@@ -395,7 +395,7 @@ ntree_values <- c(seq(from = 100, to = 500, by = 20))
 nodesize_values <- c(seq(from = 2, to = 20, by = 2))
 maxnode_values <- c(seq(from = 2, to = 20, by = 2))
 
-results <- data.frame(ntree = integer(), nodesize = integer(), maxnodes = integer(), accuracy_train = numeric(), accuracy_test = numeric())
+results_top21 <- data.frame(ntree = integer(), nodesize = integer(), maxnodes = integer(), accuracy_train = numeric(), accuracy_test = numeric())
 
 set.seed(100221)
 for (ntree in ntree_values) {
@@ -408,19 +408,19 @@ for (ntree in ntree_values) {
       
       for (i in 1:10) {
         # Train Random Forest model
-        rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = ntree, nodesize = nodesize, maxnodes = maxnodes)
+        rf_model_top21 <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_top_train, importance = TRUE, ntree = ntree, nodesize = nodesize, maxnodes = maxnodes)
         
         # Make predictions
-        predictions_train <- predict(rf_model_full, rf_data_full_train)
-        predictions_test <- predict(rf_model_full, rf_data_full_test)
+        predictions_train <- predict(rf_model_top21, rf_data_top_train)
+        predictions_test <- predict(rf_model_top21, rf_data_top_test)
         
         # Calculate accuracy for training and test sets
-        accuracy_train_full <- sum(predictions_train == rf_data_full_train$Acuity_max) / nrow(rf_data_full_train)
-        accuracy_new_full <- sum(predictions_test == rf_data_full_test$Acuity_max) / nrow(rf_data_full_test)
+        accuracy_train_top <- sum(predictions_train == rf_data_top_train$Acuity_max) / nrow(rf_data_top_train)
+        accuracy_new_top <- sum(predictions_test == rf_data_top_test$Acuity_max) / nrow(rf_data_top_test)
         
         # Store the accuracy values for each iteration
-        acc_new[i] <- accuracy_new_full
-        acc_train[i] <- accuracy_train_full
+        acc_new[i] <- accuracy_new_top
+        acc_train[i] <- accuracy_train_top
       }
       
       # Compute the mean accuracy for this parameter combination
@@ -428,11 +428,31 @@ for (ntree in ntree_values) {
       acc_new_mean <- mean(acc_new)
       
       # Append the results for this parameter combination to the results data frame
-      results <- rbind(results, data.frame(ntree = ntree, nodesize = nodesize, maxnodes = maxnodes, accuracy_train = acc_train_mean, accuracy_test = acc_new_mean))
+      results_top21 <- rbind(results_top21, data.frame(ntree = ntree, nodesize = nodesize, maxnodes = maxnodes, accuracy_train = acc_train_mean, accuracy_test = acc_new_mean))
     }
   }
 }
-
 ```
 
-#See if using just 21 biomarkers is enough
+#Access machine learning performance
+```{r}
+set.seed(100221)
+rf_model_top21 <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_top_train, importance = TRUE, ntree = 140, nodesize = 2, maxnodes = 18)
+
+set.seed(100221)
+predictions_new_top <- predict(rf_model_top21, rf_data_top_test)
+set.seed(100221)
+predicted_prod <- predict(rf_model_top21, rf_data_top_test, type = "prob")
+
+#Compute evaluation metrics 
+confusion_matrix_new_top <- table(predictions_new_top, rf_data_top_test$Acuity_max)
+accuracy <- sum(diag(confusion_matrix_new_top))/sum(confusion_matrix_new_top)
+precision <- confusion_matrix_new_top[2,2]/sum(confusion_matrix_new_top[2,])
+recall <- confusion_matrix_new_top[2,2]/sum(confusion_matrix_new_top[,2])
+f1_score <- 2 * (precision * recall)/(precision + recall)
+
+#Calculate area under the curve (AUC) and plot the ROC
+roc_curve <- roc(rf_data_top_test$Acuity_max, predicted_prod[,2])
+auc <- auc(roc_curve)
+ROC_plot <- plot(roc_curve)
+```
