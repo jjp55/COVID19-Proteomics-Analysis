@@ -258,7 +258,7 @@ proteinMatrix[i, ] <- importance[, "Proteins"]
 }
 ```
 
-#Access machine learning performance
+#Assess machine learning performance
 ```{r}
 set.seed(100221)
 rf_model_full <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_full_train, importance = TRUE, ntree = 150, nodesize = 15, maxnodes = 20)
@@ -434,7 +434,7 @@ for (ntree in ntree_values) {
 }
 ```
 
-#Access machine learning performance
+#Assess machine learning performance
 ```{r}
 set.seed(100221)
 rf_model_top21 <- randomForest(as.factor(Acuity_max) ~ ., data = rf_data_top_train, importance = TRUE, ntree = 140, nodesize = 2, maxnodes = 18)
